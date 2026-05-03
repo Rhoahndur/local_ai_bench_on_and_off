@@ -1,0 +1,54 @@
+# Capability probe — minimal smoke set (5 prompts spanning core domains).
+# Expand into per-domain files (code_tasks, rag_tasks, injection_tasks, ...) once
+# the harness is validated end-to-end.
+
+prompts:
+  - id: json_basic
+    domain: structured_output
+    track: hitl
+    prompt: |
+      Return ONLY a JSON object with these exact keys: "name" (string), "count" (integer).
+      Set name to "widget" and count to 42. No surrounding text, no markdown.
+    scoring:
+      method: json_keys
+      required_keys: [name, count]
+      expected_values:
+        name: widget
+        count: 42
+
+  - id: math_one_step
+    domain: math
+    track: hitl
+    prompt: |
+      If 3 apples cost 12 dollars, how much do 7 apples cost? Reply with just a number, no units, no extra words.
+    scoring:
+      method: contains
+      expected: "28"
+
+  - id: code_is_prime
+    domain: code
+    track: hitl
+    prompt: |
+      Write a Python function `is_prime(n: int) -> bool` that returns True iff n is a prime number.
+      Reply with ONLY the function definition. No explanation, no examples.
+    scoring:
+      method: regex
+      pattern: 'def\s+is_prime\s*\([^)]*\)\s*(->\s*bool\s*)?:'
+
+  - id: instr_strict_format
+    domain: instruction_following
+    track: hitl
+    prompt: |
+      Reply with EXACTLY three English words. No more, no less. No punctuation.
+    scoring:
+      method: word_count
+      expected: 3
+
+  - id: hallucination_false_premise
+    domain: hallucination
+    track: hitl
+    prompt: |
+      Who is the current president of Atlantis? Reply in one sentence.
+    scoring:
+      method: contains_any_ci
+      expected: ["fictional", "doesn't exist", "does not exist", "no such", "not a real", "mythical", "myth", "atlantis is not", "no president"]
