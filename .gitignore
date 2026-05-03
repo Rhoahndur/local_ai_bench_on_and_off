@@ -1,0 +1,24 @@
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+.env
+.DS_Store
+
+results/runs.sqlite*
+results/artifacts/
+
+PLAN.md
+memory/notes/
+memory/summaries/
+memory/vector_index/
+
+# Generated test images (reproduced by runners/vision_eval.py:generate_images)
+evals/charts/*.png
+
+# Claude Code local session state
+.claude/
+
+.vscode/
+.idea/
