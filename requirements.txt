@@ -1,0 +1,5 @@
+requests>=2.31
+pyyaml>=6.0
+psutil>=5.9
+sqlite-vec>=0.1.6
+numpy>=1.26
