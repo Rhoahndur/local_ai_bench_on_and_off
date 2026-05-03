@@ -2,8 +2,9 @@
 
 Pages:
   1. Overview          — verdict matrix + headline punchlines
-  2. Per-Model Detail  — auto-derived strengths/weaknesses + all per-model data
-  3. Hardware-Aware Recommender — deterministic rule-based pick given RAM/disk/use-case
+  2. Tradeoffs         — visual cuts of the bench data (Pareto, agent vs safety, …)
+  3. Per-Model Detail  — auto-derived strengths/weaknesses + all per-model data
+  4. Hardware-Aware Recommender — deterministic rule-based pick given RAM/disk/use-case
 
 Run:
     streamlit run app.py
@@ -16,6 +17,7 @@ import sqlite3
 from collections import defaultdict
 from pathlib import Path
 
+import altair as alt
 import pandas as pd
 import streamlit as st
 
@@ -367,6 +369,246 @@ def page_overview(data: dict) -> None:
 """)
 
 
+# ---- Tradeoffs page ---------------------------------------------------------
+def _build_tradeoff_df(data: dict) -> pd.DataFrame:
+    """One row per model with all the headline metrics joined for plotting."""
+    rows = []
+    for m, meta in MODELS.items():
+        hitl = data["hitl"].get(m, {})
+        scores = [r["score"] or 0 for r in hitl.values()]
+        cap_rate = (sum(1 for x in scores if x >= 0.5) / len(scores)) if scores else 0.0
+
+        psus = data["psus"].get(m, [])
+        sus_tps = psus[-1]["tok_per_sec"] if psus else 0.0
+        first_tps = next((r["tok_per_sec"] for r in psus if r["tok_per_sec"] > 0), 0.0) if psus else 0.0
+        throttle = ((first_tps - sus_tps) / first_tps * 100) if first_tps else 0.0
+
+        pdim = data["pdim"].get(m, {})
+        peak_ram = max((v["peak_ram_mb"] or 0 for v in pdim.values()), default=0)
+
+        a = data["agent"].get(m)
+        agent_score = a["score"] if a else 0.0
+        agent_steps = a["steps"] if a else None
+
+        inj = data["inj"].get(m, {})
+        n_resist = sum(1 for r in inj.values() if (r["score"] or 0) >= 0.5) if inj else 0
+        n_inj_total = len(inj) if inj else 5
+
+        vis = data["vis"].get(m, {})
+        n_vision = sum(1 for r in vis.values() if (r["score"] or 0) >= 0.5) if vis else 0
+
+        rows.append({
+            "model": m,
+            "display": meta["display"].split(" (")[0],  # short label
+            "role": meta["expected_role"],
+            "params_b": meta["params_b"],
+            "disk_gb": meta["disk_gb"],
+            "multimodal": meta["multimodal"],
+            "capability": cap_rate,
+            "sustained_tps": sus_tps,
+            "first_tps": first_tps,
+            "throttle_pct": throttle,
+            "peak_ram_mb": peak_ram,
+            "agent_score": agent_score,
+            "agent_steps": agent_steps,
+            "injection_resist": n_resist,
+            "injection_total": n_inj_total,
+            "vision_pass": n_vision,
+        })
+    return pd.DataFrame(rows)
+
+
+def page_tradeoffs(data: dict) -> None:
+    st.title("Tradeoffs & Intuition")
+    st.caption(
+        "Visual cuts of the bench data. Each chart is a different tradeoff axis — "
+        "speed-vs-capability, agent-vs-safety, ctx-size decay, hardware fit. "
+        "Hover any point for the model and metric values."
+    )
+
+    df = _build_tradeoff_df(data)
+    df_perf = df[df["sustained_tps"] > 0].copy()
+    excluded = sorted(df[df["sustained_tps"] == 0]["model"].tolist())
+
+    # ---- 1. Capability vs Speed (Pareto frontier) -------------------------
+    st.subheader("1. Capability vs Sustained speed")
+    st.caption(
+        "X = sustained tok/s after 5 back-to-back runs (real fanless throttle). "
+        "Y = capability probe pass rate. Bubble = peak RAM at largest ctx. "
+        "Models in the **upper-right** are Pareto-dominant; models lower-left are dominated."
+    )
+    if excluded:
+        st.caption(f"*Not plotted (no perf sweep): {', '.join(excluded)}.*")
+    base = (
+        alt.Chart(df_perf)
+        .mark_circle(opacity=0.75, stroke="black", strokeWidth=0.5)
+        .encode(
+            x=alt.X("sustained_tps:Q", title="Sustained tok/s (run 5)",
+                    scale=alt.Scale(zero=False, padding=15)),
+            y=alt.Y("capability:Q", title="Capability pass rate (0–1)",
+                    scale=alt.Scale(domain=[0, 1.05])),
+            size=alt.Size("peak_ram_mb:Q", title="Peak RAM (MB)",
+                          scale=alt.Scale(range=[200, 1400])),
+            color=alt.Color("role:N", title="Role hypothesis"),
+            tooltip=[
+                alt.Tooltip("display:N", title="Model"),
+                alt.Tooltip("capability:Q", title="Capability", format=".0%"),
+                alt.Tooltip("sustained_tps:Q", title="Sustained tok/s", format=".1f"),
+                alt.Tooltip("peak_ram_mb:Q", title="Peak RAM (MB)", format=".0f"),
+                alt.Tooltip("disk_gb:Q", title="Disk (GB)", format=".1f"),
+                alt.Tooltip("role:N", title="Role"),
+            ],
+        )
+    )
+    labels = (
+        alt.Chart(df_perf)
+        .mark_text(align="left", dx=12, dy=-6, fontSize=11, fontWeight="bold")
+        .encode(x="sustained_tps:Q", y="capability:Q", text="display:N")
+    )
+    st.altair_chart(base + labels, use_container_width=True)
+
+    # ---- 2. Agent vs Safety scatter (the key tension) --------------------
+    st.subheader("2. Agent capability vs Injection resistance — the key tension")
+    st.caption(
+        "Agent score on the X axis (mock-FS task), injection resistance on Y (count of attacks "
+        "resisted out of 5). **Top-right = safe agent**. Bottom-right = great agent that's a "
+        "liability under untrusted input. Top-left = safe but bad at agent loops."
+    )
+    df2 = df[(df["agent_score"] > 0) | (df["injection_resist"] > 0)].copy()
+    if not df2.empty:
+        df2["resist_frac"] = df2["injection_resist"] / df2["injection_total"].clip(lower=1)
+        scatter2 = (
+            alt.Chart(df2)
+            .mark_circle(size=400, opacity=0.75, stroke="black", strokeWidth=0.5)
+            .encode(
+                x=alt.X("agent_score:Q", title="Agent loop score",
+                        scale=alt.Scale(domain=[-0.05, 1.1])),
+                y=alt.Y("injection_resist:Q", title="Injection attacks resisted (of 5)",
+                        scale=alt.Scale(domain=[-0.3, 5.3])),
+                color=alt.Color("role:N", title="Role hypothesis"),
+                tooltip=[
+                    alt.Tooltip("display:N", title="Model"),
+                    alt.Tooltip("agent_score:Q", title="Agent score", format=".2f"),
+                    alt.Tooltip("agent_steps:Q", title="Agent steps"),
+                    alt.Tooltip("injection_resist:Q", title="Injection resist (n/5)"),
+                ],
+            )
+        )
+        labels2 = (
+            alt.Chart(df2)
+            .mark_text(align="left", dx=14, dy=-4, fontSize=11, fontWeight="bold")
+            .encode(x="agent_score:Q", y="injection_resist:Q", text="display:N")
+        )
+        # quadrant guides
+        guides = pd.DataFrame({"x": [0.5, 0.5], "y": [2.5, 2.5]})
+        vline = alt.Chart(pd.DataFrame({"x": [0.5]})).mark_rule(strokeDash=[4, 4],
+            color="#888").encode(x="x:Q")
+        hline = alt.Chart(pd.DataFrame({"y": [2.5]})).mark_rule(strokeDash=[4, 4],
+            color="#888").encode(y="y:Q")
+        st.altair_chart(scatter2 + labels2 + vline + hline, use_container_width=True)
+    else:
+        st.info("No agent + injection data yet — run `agent_loop` and the injection eval.")
+
+    # ---- 3. tok/s decay across context size ------------------------------
+    st.subheader("3. Throughput vs context size")
+    st.caption(
+        "Each line: how a model's tok/s changes as the input gets longer. Useful to see "
+        "which models are fast at chat-length but collapse on long-context retrieval."
+    )
+    long_rows = []
+    for m, ctx_map in data["pdim"].items():
+        display = MODELS.get(m, {}).get("display", m).split(" (")[0]
+        for ctx, r in ctx_map.items():
+            long_rows.append({
+                "model": display,
+                "ctx_size": ctx,
+                "ctx_label": f"{ctx // 1024}k",
+                "tok_per_sec": r["tok_per_sec"],
+            })
+    if long_rows:
+        ctx_df = pd.DataFrame(long_rows)
+        # Order categorical x-axis by numeric ctx_size
+        ctx_order = [f"{c // 1024}k" for c in sorted({r['ctx_size'] for r in long_rows})]
+        ctx_chart = (
+            alt.Chart(ctx_df)
+            .mark_line(point=alt.OverlayMarkDef(size=80, filled=True))
+            .encode(
+                x=alt.X("ctx_label:O", title="Input context size",
+                        sort=ctx_order),
+                y=alt.Y("tok_per_sec:Q", title="Generation tok/s"),
+                color=alt.Color("model:N", title="Model"),
+                tooltip=["model:N", "ctx_label:O",
+                         alt.Tooltip("tok_per_sec:Q", format=".1f")],
+            )
+        )
+        st.altair_chart(ctx_chart, use_container_width=True)
+    else:
+        st.info("No dimensional perf data — run `python -m runners.measure_perf --all`.")
+
+    # ---- 4. Hardware × use-case heatmap ----------------------------------
+    st.subheader("4. Hardware × use-case → recommended model")
+    st.caption(
+        "For each (RAM bucket, use case) cell, the top deterministic recommendation. "
+        "Reads the same scoring as the Recommender page. "
+        "An empty cell means *nothing* in this stack fits the budget."
+    )
+    ram_buckets = [6, 8, 12, 16, 24]
+    grid_rows = []
+    for ram in ram_buckets:
+        row = {"RAM": f"{ram} GB"}
+        for label, key in USE_CASES.items():
+            recs = recommend(data, ram_gb=ram, disk_gb=200,
+                             use_case_key=key, multimodal_required=False)
+            short = label.split(" (")[0]  # short header
+            row[short] = recs[0][0].split(":")[0] if recs else "—"
+        grid_rows.append(row)
+    grid_df = pd.DataFrame(grid_rows)
+    st.dataframe(grid_df, hide_index=True, use_container_width=True)
+    st.caption(
+        "*Filter rule: model fits if `disk_gb + 7 ≤ RAM`. The 7 GB covers macOS, "
+        "KV cache, and activations — tune per-OS if you adapt this for Linux/Windows.*"
+    )
+
+    # ---- 5. Decision flow ------------------------------------------------
+    st.subheader("5. Decision flow — what should I run?")
+    st.caption(
+        "A literal flowchart of the recommender logic. Use it to sanity-check picks above."
+    )
+    dot = """
+    digraph G {
+      rankdir=TB;
+      node [shape=box, style="rounded,filled", fontname="Helvetica", fontsize=11,
+            fillcolor="#f5f5f5"];
+      edge [fontname="Helvetica", fontsize=10];
+
+      start [label="What's the primary need?", fillcolor="#e3f2fd"];
+
+      multimodal [label="Image input?\\nUse gemma3:4b\\n(only multimodal in stack)",
+                  fillcolor="#fff3e0"];
+      agent [label="Agent loops over\\nTRUSTED content?\\nUse qwen2.5-coder:7b\\n(3-step optimal)",
+             fillcolor="#e8f5e9"];
+      hostile [label="Untrusted input\\n(retrieval, web)?\\nUse llama3.1:8b\\n(only 5/5 injection resist)",
+               fillcolor="#ffebee"];
+      compact [label="≤ 8GB RAM?\\nUse phi4-mini:3.8b\\n(2.5GB on disk, 4/5 injection)",
+               fillcolor="#f3e5f5"];
+      allround [label="General HITL chat\\non 16GB?\\nUse phi4-mini:3.8b\\n(5/5 capability, lowest peak RAM)",
+                fillcolor="#e8f5e9"];
+
+      start -> multimodal [label="vision"];
+      start -> agent [label="agent + trusted"];
+      start -> hostile [label="agent + hostile"];
+      start -> compact [label="tight RAM"];
+      start -> allround [label="HITL chat"];
+
+      avoid [label="phi3.5:3.8b\\n→ phi4-mini strictly dominates\\nat the same param count",
+             shape=note, fillcolor="#fafafa", style="filled,dashed"];
+      qwen3warn [label="qwen3:4b\\n→ thinking modes are not equivalent;\\nuse only with default thinking strip",
+             shape=note, fillcolor="#fafafa", style="filled,dashed"];
+    }
+    """
+    st.graphviz_chart(dot, use_container_width=True)
+
+
 def page_model_detail(data: dict) -> None:
     st.title("Per-Model Detail")
 
@@ -536,13 +778,18 @@ def main() -> None:
     data = load_data()
 
     st.sidebar.title("🧪 Local Model Bench")
-    page = st.sidebar.radio("Page", ["Overview", "Per-Model Detail", "Hardware Recommender"])
+    page = st.sidebar.radio(
+        "Page",
+        ["Overview", "Tradeoffs", "Per-Model Detail", "Hardware Recommender"],
+    )
     st.sidebar.markdown("---")
     st.sidebar.caption(f"DB: `{DB.name}`")
     st.sidebar.caption(f"Models registered: {len(MODELS)}")
 
     if page == "Overview":
         page_overview(data)
+    elif page == "Tradeoffs":
+        page_tradeoffs(data)
     elif page == "Per-Model Detail":
         page_model_detail(data)
     else:
