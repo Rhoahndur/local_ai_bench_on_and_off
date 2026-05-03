@@ -1,0 +1,67 @@
+# Local model bench — model registry.
+# Toggle `enabled` to control which models the harness runs.
+# `tier`, `expected_role`, and context come from PLAN.md §3.
+
+models:
+  # Tier A — general baseline (7-8B). Disabled until trickle-pulled.
+  - id: llama3.1:8b-instruct-q4_K_M
+    provider: ollama
+    tier: A
+    expected_role: general-baseline
+    disk_gb: 4.9
+    context: 128000
+    enabled: true
+
+  - id: qwen2.5-coder:7b
+    provider: ollama
+    tier: A
+    expected_role: code-specialist
+    disk_gb: 4.7
+    context: 32000
+    enabled: true
+
+  - id: phi3.5:3.8b-mini-instruct-q4_K_M
+    provider: ollama
+    tier: A
+    expected_role: compact-reasoning-prev-gen
+    disk_gb: 2.4
+    context: 128000
+    enabled: true
+
+  # Tier B — small + new (3-4B).
+  - id: gemma3:4b
+    provider: ollama
+    tier: B
+    expected_role: vision-multilingual
+    disk_gb: 3.3
+    context: 128000
+    multimodal: true
+    enabled: false
+
+  - id: qwen3:4b
+    provider: ollama
+    tier: B
+    expected_role: agent-thinking
+    disk_gb: 2.5
+    context: 256000
+    features: [tools, thinking]
+    enabled: true
+
+  - id: phi4-mini:3.8b
+    provider: ollama
+    tier: B
+    expected_role: compact-reasoning-new-gen
+    disk_gb: 2.5
+    context: 128000
+    features: [tools]
+    enabled: true
+
+embedding:
+  id: nomic-embed-text
+  provider: ollama
+  dim: 768
+  disk_gb: 0.27
+
+judge:
+  id: phi4-mini:3.8b
+  fallback: qwen3:4b
