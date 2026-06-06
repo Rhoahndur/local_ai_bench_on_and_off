@@ -29,6 +29,10 @@ DB = ROOT / "results" / "runs.sqlite"
 
 
 def _connect() -> sqlite3.Connection:
+    # Ensure tables exist even if this is the first read (prevents
+    # "no such table" crashes and makes "untested" output graceful).
+    from runners.db import init_db
+    init_db(DB)
     conn = sqlite3.connect(str(DB))
     conn.row_factory = sqlite3.Row
     return conn

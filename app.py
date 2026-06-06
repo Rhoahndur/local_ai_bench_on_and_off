@@ -63,6 +63,13 @@ MODELS: dict[str, dict] = {
 # ---- Data loading ----------------------------------------------------------
 @st.cache_data
 def load_data() -> dict:
+    # Ensure schema so dashboard is usable even on empty/missing DB
+    # (runners do this on write paths; readers should too for UX).
+    try:
+        from runners.db import init_db
+        init_db(DB)
+    except Exception:
+        pass  # don't block dashboard render on init hiccup
     conn = sqlite3.connect(str(DB))
     conn.row_factory = sqlite3.Row
 
