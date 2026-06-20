@@ -160,3 +160,7 @@ local_ai_bench_on_and_off/
 ## Re-running weekly
 
 Schema is `CREATE TABLE IF NOT EXISTS`, models toggle via YAML, runners append to `eval_runs` with timestamps and `run_id`. Pin the full-bench commands in `launchd`/`cron` and the leaderboard regenerates itself. To add a new model, append to `models.yaml` and re-run; no code change.
+
+## License
+
+MIT. See [LICENSE](LICENSE).
